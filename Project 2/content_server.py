@@ -60,8 +60,10 @@ class Content_server():
 
         self.hostname = socket.gethostname()
 
-        self.sequence_number = 0
+        self.sequence_tracker = {}
         self.timeout_tracker = {}
+
+        self.map = {self.name : {}}
         
         for i in range(self.peer_count):
             peer_info = config['peer_' + str(i)].split(",")
@@ -89,25 +91,22 @@ class Content_server():
         #         'metric': peer_metric
         #     }
 
-        #     self.timeout_tracker[name] = time.time(),  # last time we heard from this peer
+        #     self.timeout_tracker[peer_uuid] = time.time()
+        #     self.link_state_adv()
             
 
 
         # TODO: Extract neighbor information and populate the initial variables
         
         # TODO: Update the map
-        self.map = {}
-        for peer_name, peer_info in self.peers.items():
-            if peer_name not in self.map:
-                self.map[self.name] = {}
-            self.map[self.name].update({peer_name: peer_info['metric']})
 
         # TODO: Initialize link state advertisement that repeats using a neighbor variable
         self.link_state_adv()
         self.remain_threads = True
         
+        
 
-        # print("Initial setting complete")
+        print(f"Content server {self.name} started.")
 
         
         self.alive()
@@ -129,20 +128,23 @@ class Content_server():
             name = "temp" + str(random.randint(1, 100))
         self.peers[name] = new_peer
 
-        self.timeout_tracker[name] = time.time()  # last time we heard from this peer
+        self.timeout_tracker[uuid] = time.time()
 
-        # self.map[self.name].update({name : metric}) # update the map with the new peer
+        self.sequence_tracker[uuid] = 0
+
+        self.map[self.name].update({name : metric}) # update the map with the new peer
+
         self.link_state_adv()
     
     def link_state_adv(self):
         #while self.remain_threads:
             # TODO: Perform Link State Advertisement to all your neighbors periodically 
-
+            # format: LSA, name, uuid, backend_port, metric, hostname, sequence_number, map of the sender
             peers_copy = dict(self.peers)
-
-            self.sequence_number += 1
+            
             for peer_name, peer_info in peers_copy.items():
-                advertisement = "LSA," + str(self.name) + "," + str(self.uuid) + "," + str(self.backend_port) + "," + str(peer_info['metric']) + "," + str(self.hostname) + "," + str(self.sequence_number)
+                self.sequence_tracker[peer_info['uuid']] += 1
+                advertisement = "LSA," + str(self.name) + "," + str(self.uuid) + "," + str(self.backend_port) + "," + str(peer_info['metric']) + "," + str(self.hostname) + "," + str(self.sequence_tracker[peer_info['uuid']]) + "," + str(self.map[self.name])
                 ad_message = str(advertisement).encode()
                 try:
                     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -157,7 +159,7 @@ class Content_server():
     def link_state_flood(self, msg):
         # TODO: If new information then send to all your neighbors, if old information then drop.
         for peer_name, peer_info in self.peers.items():
-            advertisement = msg
+            advertisement = "LSAFlood," + str(self.name) + "," + str(self.uuid) + "," + str(peer_info['metric']) + "," + str(self.sequence_tracker[peer_info['uuid']]) + "," + str(self.map[self.name])
             ad_message = str(advertisement).encode()
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -178,9 +180,18 @@ class Content_server():
             except Exception as e:
                 print(f"Error sending advertisement to {peer_name}: {e}")
     
-    def dead_flood(self, send_time, host, peer):
+    def dead_flood(self, sequence_num, peername):
         # TODO: Forward the death message information to other peers
-        return
+        for peer_name, peer_info in self.peers.items():
+            advertisement = "Deathflood," + str(peername)
+            ad_message = str(advertisement).encode()
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.connect((peer_info['hostname'], peer_info['backend_port']))
+                    s.send(ad_message)
+            except Exception as e:
+                print(f"Error sending advertisement to {peer_name}: {e}")
+        
 
     def keep_alive(self):
         # TODO: Tell that you are alive to all your neighbors, periodically.
@@ -195,8 +206,8 @@ class Content_server():
                         s.connect((peer_info['hostname'], peer_info['backend_port']))
                         s.send(ad_message)
                 except Exception as e:
-                    #print(f"Error sending keepalive to {peer_uuid}: {e}")
-                    pass
+                    print(f"Error sending keepalive to {peer_uuid}: {e}")
+                    #pass
 
             time.sleep(ALIVE_SGN_INTERVAL)
         
@@ -219,60 +230,138 @@ class Content_server():
                 pass
             elif msg.startswith("Alive"): # Update the timeout time if known node, otherwise add new neighbor
                 # print("Received Alive message: ", msg)
+                #print("Timeout tracker: ", self.timeout_tracker)
+                #print("Peers: ", self.peers)
                 tokens = msg.split(",")
                 # format: Alive, name, uuid, backend_port, metric, hostname
-                self.timeout_tracker[tokens[1]] = time.time()  # update the last seen time
+                
+                self.timeout_tracker[tokens[2]] = time.time()
+
+                temps = [key for key in self.peers.keys() if key.startswith("temp")]
+                if len(temps) > 0:
+                    for temp in temps:
+                        if tokens[2] == self.peers[temp]['uuid']:
+                            # Replace temp key with the actual UUID
+                            self.peers[tokens[1]] = self.peers.pop(temp)
+                            # self.timeout_tracker[tokens[1]] = self.timeout_tracker.pop(temp)
+                            self.map[self.name].update({tokens[1] : int(tokens[4])}) # update the map with the new peer
+                            self.map[self.name].pop(temp, None)
+                            
+                
 
             elif msg.startswith("LSA"):     # Update the map based on new information, drop if old information
                 #If new information, also flood to other neighbors
-                #print("Received LSA message: ", msg)
+                print("Received LSA message: ", msg)
 
                 tokens = msg.split(",")
-                # format: LSA, name, uuid, backend_port, metric, hostname, sequence_number
+                # format: LSA, name, uuid, backend_port, metric, hostname, sequence_number, map of the sender
+                name = tokens[1]
+                uuid = tokens[2]
+                received_map = tokens[7]
 
-                if int(tokens[6]) > self.sequence_number:
-                    self.sequence_number = int(tokens[6])
-                    if tokens[1] not in self.peers.keys(): # new peer
+                sequence_number = int(tokens[6])
+
+                if sequence_number > self.sequence_tracker.get(uuid, 0):
+                    self.sequence_tracker[uuid] = sequence_number
+                    if name not in self.peers.keys(): # new peer
                         self.addneighbor(tokens[2], tokens[5], int(tokens[3]), int(tokens[4]))
 
                     temps = [key for key in self.peers.keys() if key.startswith("temp")]
                     if len(temps) > 0:
                         for temp in temps:
-                            if tokens[2] == self.peers[temp]['uuid']:
-                                # Replace temp key with the actual UUID
-                                self.peers[tokens[1]] = self.peers.pop(temp)
+                            if uuid == self.peers[temp]['uuid']:
+                                # Replace temp key with the actual name
+                                self.peers[name] = self.peers.pop(temp)
                                 # self.timeout_tracker[tokens[1]] = self.timeout_tracker.pop(temp)
                     
                     self.timeout_tracker = {}
-                    for peer_name in self.peers.keys():
-                        self.timeout_tracker[peer_name] = time.time()
+                    for peer_name, peer_info in self.peers.items():
+                        self.timeout_tracker[peer_info['uuid']] = time.time()
 
-                    self.link_state_flood(msg) # Flood the new information to all neighbors
+                    # update the map with the new information
+                    self.map[self.name].update({name : int(tokens[4])})
+
+                    self.link_state_flood(received_map) # Flood the new information to all neighbors
                 
-                                
-                
-                    
+            elif msg.startswith("LSAFlood"): 
+
+                # Flood the new information to all neighbors
+                print("Received LSAFlood message: ", msg)
+                tokens = msg.split(",")
+                # format: LSAFlood, name, uuid, metric, sequence_number, map of the sender
+                name = tokens[1]
+                uuid = tokens[2]
+                received_map = tokens[5]
+                sequence_number = int(tokens[4])
+                if sequence_number > self.sequence_tracker.get(uuid, 0):
+                    self.sequence_tracker[uuid] = sequence_number
+                    self.map[self.name].update({name : int(tokens[3])}) # update the map with the new information
+                    self.link_state_flood(received_map)
+
             elif msg.startswith("Death"): # Delete the node if it sends the message before executing kill.
                 
                 print("Received Death message: ", msg)
                 
                 tokens = msg.split(",")
                 peer_name = tokens[1]
+                peer_uuid = tokens[2]
                 # format: Death, name, uuid, backend_port, hostname
+                print("Removing peer: ", peer_name, peer_uuid)
                 self.peers.pop(peer_name, None)
-                self.timeout_tracker.pop(peer_name, None)
+                print("Peers after removing: ", self.peers)
+                self.timeout_tracker.pop(peer_uuid, None)
+
+                self.map[self.name].pop(peer_name, None)
+                final_seq = self.sequence_tracker.pop(peer_uuid, None)
+                self.dead_flood(final_seq + 1, peer_name) 
+            elif msg.startswith("Deathflood"): # someone in the network died, flood the information to other peers
+                print("Received Deathflood message: ", msg)
+                tokens = msg.split(",")
+                sequence_number = int(tokens[1])
+                peer_name = tokens[2]
+
+                if sequence_number > self.sequence_tracker.get(uuid, 0):
+                    self.sequence_tracker[uuid] = sequence_number
+                    self.map[self.name].pop(peer_name, None)
+                    self.dead_flood(sequence_number, peer_name) 
+            
             # otherwise the msg is dropped
 
     def timeout_old(self):
         # drop the neighbors whose information is old
         while self.remain_threads:
             timeout_copy = dict(self.timeout_tracker)
-            for peer_name in timeout_copy.keys():
-                if time.time() - self.timeout_tracker[peer_name] > TIMEOUT_INTERVAL:
-                    # remove the peer from the list
-                    print(f"Peer {peer_name} timed out")
-                    self.peers.pop(peer_name, None)
-                    self.timeout_tracker.pop(peer_name, None)
+            peers_copy = dict(self.peers)
+            current_time = time.time()
+
+            for peer_name, peer_info in peers_copy.items():
+                peer_uuid = peer_info['uuid']
+                last_time = timeout_copy.get(peer_uuid, None)
+                if last_time is not None:
+                    if current_time - last_time > TIMEOUT_INTERVAL:
+                        print(f"Peer {peer_uuid} timed out")
+                        self.peers.pop(peer_name, None)
+                        self.timeout_tracker.pop(peer_uuid, None)
+                        self.map[self.name].pop(peer_name, None)
+                        self.dead_flood(self.sequence_tracker[peer_uuid] + 1, peer_name)
+                    
+                    
+                    # for peer_name, peer_info in peers_copy.items():
+                    #     if peer_info['uuid'] == peer_uuid:
+                    #         self.peers.pop(peer_name, None)
+                    #         self.timeout_tracker.pop(peer_uuid, None)
+                    #         break
+                    
+
+
+
+            # for peer_name, peer_info in timeout_copy.items():
+            #     print("type of self.timeout_tracker:", type(self.timeout_tracker))
+            #     if time.time() - self.timeout_tracker[peer_info['uuid']] > TIMEOUT_INTERVAL:
+            #         # remove the peer from the list
+            #         print(f"Peer {peer_name} timed out")
+            #         self.peers.pop(peer_name, None)
+            #         self.timeout_tracker.pop(peer_info['uuid'], None)
             
             time.sleep(ALIVE_SGN_INTERVAL)
         
