@@ -64,9 +64,7 @@ class Content_server():
         self.timeout_tracker = {}
 
         self.map = {self.name : {}}
-
-        self.lock = threading.Lock()
-
+        
         for i in range(self.peer_count):
             peer_info = config['peer_' + str(i)].split(",")
             peer_uuid = peer_info[0].strip()
@@ -103,7 +101,7 @@ class Content_server():
         # TODO: Update the map
 
         # TODO: Initialize link state advertisement that repeats using a neighbor variable
-        #self.link_state_adv()
+        self.link_state_adv()
         self.remain_threads = True
         
         
@@ -133,28 +131,20 @@ class Content_server():
         self.timeout_tracker[uuid] = time.time()
 
         self.sequence_tracker[uuid] = 0
-        for peer_name, peer_info in self.peers.items():
-            self.sequence_tracker[peer_info['uuid']] += 1
 
-        if self.name not in self.map:
-            self.map[self.name] = {}
-        self.map[self.name][name] = metric
+        self.map[self.name].update({name : metric}) # update the map with the new peer
 
-        if name not in self.map:
-            self.map[name] = {}
-        self.map[name][self.name] = metric
-
-        #self.link_state_adv()
+        self.link_state_adv()
     
     def link_state_adv(self):
-        while self.remain_threads:
+        #while self.remain_threads:
             # TODO: Perform Link State Advertisement to all your neighbors periodically 
             # format: LSA, name, uuid, backend_port, metric, hostname, sequence_number, map of the sender
             peers_copy = dict(self.peers)
             
             for peer_name, peer_info in peers_copy.items():
                 self.sequence_tracker[peer_info['uuid']] += 1
-                advertisement = "LSA," + str(self.name) + "," + str(self.uuid) + "," + str(self.backend_port) + "," + str(peer_info['metric']) + "," + str(self.hostname) + "," + str(self.sequence_tracker[peer_info['uuid']])
+                advertisement = "LSA," + str(self.name) + "," + str(self.uuid) + "," + str(self.backend_port) + "," + str(peer_info['metric']) + "," + str(self.hostname) + "," + str(self.sequence_tracker[peer_info['uuid']]) + "," + str(self.map[self.name])
                 ad_message = str(advertisement).encode()
                 try:
                     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -163,16 +153,14 @@ class Content_server():
                 except Exception as e:
                     print(f"Error sending advertisement to {peer_name}: {e}")
 
-            time.sleep(ALIVE_SGN_INTERVAL * 3) # periodically send LSA (slower than keep alive)
+            time.sleep(ALIVE_SGN_INTERVAL)
 
     
     def link_state_flood(self, msg):
         # TODO: If new information then send to all your neighbors, if old information then drop.
         for peer_name, peer_info in self.peers.items():
-            # "FloodLSA," + str(self.name) + "," + str(self.uuid) + "," + str(peer_info['metric']) + "," + str(self.sequence_tracker[peer_info['uuid']]) + "," + str(self.map[self.name])
-            advertisement = msg.replace("LSA", "FloodLSA")
+            advertisement = "LSAFlood," + str(self.name) + "," + str(self.uuid) + "," + str(peer_info['metric']) + "," + str(self.sequence_tracker[peer_info['uuid']]) + "," + str(self.map[self.name])
             ad_message = str(advertisement).encode()
-            #print("Sending LSA Flooding message: ", advertisement)
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.connect((peer_info['hostname'], peer_info['backend_port']))
@@ -195,7 +183,7 @@ class Content_server():
     def dead_flood(self, sequence_num, peername):
         # TODO: Forward the death message information to other peers
         for peer_name, peer_info in self.peers.items():
-            advertisement = "Flooddeath," + str(sequence_num) + "," + str(peername)
+            advertisement = "Deathflood," + str(peername)
             ad_message = str(advertisement).encode()
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -246,216 +234,96 @@ class Content_server():
                 #print("Peers: ", self.peers)
                 tokens = msg.split(",")
                 # format: Alive, name, uuid, backend_port, metric, hostname
-                if self.timeout_tracker.get(tokens[2], None) is not None: # known node
-                    # update the timeout time
-                    self.timeout_tracker[tokens[2]] = time.time()
+                
+                self.timeout_tracker[tokens[2]] = time.time()
 
-                # temps = [key for key in self.peers.keys() if key.startswith("temp")]
-                # if len(temps) > 0:
-                #     for temp in temps:
-                #         if tokens[2] == self.peers[temp]['uuid']:
-                #             # Replace temp key with the actual UUID
-                #             self.peers[tokens[1]] = self.peers.pop(temp)
-                #             # self.timeout_tracker[tokens[1]] = self.timeout_tracker.pop(temp)
-                #             self.map[self.name].update({tokens[1] : int(tokens[4])}) # update the map with the new peer
-                #             self.map[self.name].pop(temp, None)
+                temps = [key for key in self.peers.keys() if key.startswith("temp")]
+                if len(temps) > 0:
+                    for temp in temps:
+                        if tokens[2] == self.peers[temp]['uuid']:
+                            # Replace temp key with the actual UUID
+                            self.peers[tokens[1]] = self.peers.pop(temp)
+                            # self.timeout_tracker[tokens[1]] = self.timeout_tracker.pop(temp)
+                            self.map[self.name].update({tokens[1] : int(tokens[4])}) # update the map with the new peer
+                            self.map[self.name].pop(temp, None)
                             
                 
 
             elif msg.startswith("LSA"):     # Update the map based on new information, drop if old information
                 #If new information, also flood to other neighbors
-                #print("Received LSA message: ", msg)
+                print("Received LSA message: ", msg)
 
                 tokens = msg.split(",")
-                # format: LSA, name, uuid, backend_port, metric, hostname, sequence_number
+                # format: LSA, name, uuid, backend_port, metric, hostname, sequence_number, map of the sender
                 name = tokens[1]
                 uuid = tokens[2]
-                backend_port = int(tokens[3])
-                metric = int(tokens[4])
-                hostname = tokens[5]
+                received_map = tokens[7]
+
                 sequence_number = int(tokens[6])
-
-                #print(tokens)
-                #print(tokens[7])
-
-
 
                 if sequence_number > self.sequence_tracker.get(uuid, 0):
                     self.sequence_tracker[uuid] = sequence_number
+                    if name not in self.peers.keys(): # new peer
+                        self.addneighbor(tokens[2], tokens[5], int(tokens[3]), int(tokens[4]))
+
+                    temps = [key for key in self.peers.keys() if key.startswith("temp")]
+                    if len(temps) > 0:
+                        for temp in temps:
+                            if uuid == self.peers[temp]['uuid']:
+                                # Replace temp key with the actual name
+                                self.peers[name] = self.peers.pop(temp)
+                                # self.timeout_tracker[tokens[1]] = self.timeout_tracker.pop(temp)
                     
-                    # Find if we already have this peer by UUID, possibly with a temp name
-                    old_name = None
+                    self.timeout_tracker = {}
                     for peer_name, peer_info in self.peers.items():
-                        if peer_info['uuid'] == uuid:
-                            old_name = peer_name
-                            break
-                            
-                    if old_name is None:
-                        # Completely new peer
-                        self.addneighbor(uuid, hostname, backend_port, metric)
-                    elif old_name != name and old_name.startswith("temp"):
-                        # We had a temp name, now we know the real name
-                        # Update all references from temp name to real name
-                        
-                        # First, update the peers dictionary
-                        self.peers[name] = self.peers.pop(old_name)
-                        
-                        # Next, update the map
-                        with self.lock:
-                            # Update entries in other nodes' maps
-                            for node in self.map:
-                                if old_name in self.map[node]:
-                                    self.map[node][name] = self.map[node].pop(old_name)
-                            
-                            # Move this node's map entries to the real name
-                            if old_name in self.map:
-                                self.map[name] = self.map.pop(old_name)
-                            
-                        # Update timeout tracker - already using UUID so no change needed
-                    else:
-                        # Update existing peer info
-                        self.peers[name]['hostname'] = hostname
-                        self.peers[name]['backend_port'] = backend_port
-                        self.peers[name]['metric'] = metric
-                        self.timeout_tracker[uuid] = time.time()
-                        
-                        # Update map
-                        # self.map[self.name][name] = metric
-                        # if name not in self.map:
-                        #     self.map[name] = {}
-                        # self.map[name][self.name] = metric
-                    
-                    # Forward the LSA to neighbors
-                    self.link_state_flood(msg + "," + str(self.name))
-                    
-                # if sequence_number > self.sequence_tracker.get(uuid, 0):
-                #     self.sequence_tracker[uuid] = sequence_number
+                        self.timeout_tracker[peer_info['uuid']] = time.time()
 
-                #     if name not in self.peers.keys(): # new peer
-                #         self.addneighbor(tokens[2], tokens[5], int(tokens[3]), int(tokens[4]))
+                    # update the map with the new information
+                    self.map[self.name].update({name : int(tokens[4])})
 
-                #     temps = [key for key in self.peers.keys() if key.startswith("temp")]
-                #     if len(temps) > 0:
-                #         for temp in temps:
-                #             if uuid == self.peers[temp]['uuid']:
-                #                 # Replace temp key with the actual name
-                #                 self.peers[name] = self.peers.pop(temp)
-                #                 self.map[name] = self.map.pop(temp)
-                #                 # self.timeout_tracker[tokens[1]] = self.timeout_tracker.pop(temp)
-                    
-                #     self.timeout_tracker = {}
-                #     for peer_name, peer_info in self.peers.items():
-                #         self.timeout_tracker[peer_info['uuid']] = time.time()
-
-                #     # update the map with the new information
-                #     self.map[self.name].update({name : int(tokens[4])})
-
-                #     self.link_state_flood(received_map) # Flood the new information to all neighbors
+                    self.link_state_flood(received_map) # Flood the new information to all neighbors
                 
-            elif msg.startswith("FloodLSA"): 
+            elif msg.startswith("LSAFlood"): 
 
                 # Flood the new information to all neighbors
-                #print("Received LSAFlood message: ", msg)
+                print("Received LSAFlood message: ", msg)
                 tokens = msg.split(",")
-                # format: LSAFlood, name, uuid, backend_port, metric, hostname, sequence_number, destination_name
+                # format: LSAFlood, name, uuid, metric, sequence_number, map of the sender
                 name = tokens[1]
                 uuid = tokens[2]
-                metric = int(tokens[4])
-                hostname = tokens[5]
-                sequence_number = int(tokens[6])
-                destination_name = tokens[7]
-                # received_map = ast.literal_eval(tokens[5])
-                #print("destination_name: ", destination_name)
-        
+                received_map = tokens[5]
+                sequence_number = int(tokens[4])
                 if sequence_number > self.sequence_tracker.get(uuid, 0):
                     self.sequence_tracker[uuid] = sequence_number
-                    
-                    # Find if we already have this peer by UUID
-                    old_name = None
-                    for peer_name, peer_info in self.peers.items():
-                        if peer_info['uuid'] == uuid:
-                            old_name = peer_name
-                            break
-                    
-                    if old_name is not None and old_name != name and old_name.startswith("temp"):
-                        # Replace temp name with real name
-                        with self.lock:
-                            # Update all references from temp name to real name
-                            for node in self.map:
-                                if old_name in self.map[node]:
-                                    self.map[node][name] = self.map[node].pop(old_name)
-                            
-                            if old_name in self.map:
-                                self.map[name] = self.map.pop(old_name)
-                    
-                    # Update the map with new information
-                    # if not name.startswith("temp"):
-                    #     if name not in self.map or destination_name not in self.map:
-                    #         self.map[name] = {}
-                    #         self.map[destination_name] = {}
-                    #     if self.map.get(name, None) is not None and self.map.get(destination_name, None) is not None:
-                    #         self.map[name][destination_name] = metric
-                    #         self.map[destination_name][name] = metric
-                    if not name.startswith("temp") and not destination_name.startswith("temp"):
-                        
-                        # print(f"Add {name} -> {destination_name} with metric {metric}")
-                        if name not in self.map or destination_name not in self.map:
-                            self.map[name] = {}
-                            self.map[destination_name] = {}
-                        if self.map.get(name, None) is not None and self.map.get(destination_name, None) is not None:
-                            self.map[name][destination_name] = metric
-                            self.map[destination_name][name] = metric
-                    
-                    # Forward the flood
-                    self.link_state_flood(msg)
-
-                # received_map = tokens[5]
-                # sequence_number = int(tokens[4])
-                # if sequence_number > self.sequence_tracker.get(uuid, 0):
-                #     self.sequence_tracker[uuid] = sequence_number
-                #     self.map[self.name].update({name : int(tokens[3])}) # update the map with the new information
-                #     self.link_state_flood(received_map)
+                    self.map[self.name].update({name : int(tokens[3])}) # update the map with the new information
+                    self.link_state_flood(received_map)
 
             elif msg.startswith("Death"): # Delete the node if it sends the message before executing kill.
                 
                 print("Received Death message: ", msg)
                 
                 tokens = msg.split(",")
-                dead_node = tokens[1]
+                peer_name = tokens[1]
                 peer_uuid = tokens[2]
                 # format: Death, name, uuid, backend_port, hostname
-                print("Removing peer: ", dead_node, peer_uuid)
-                self.peers.pop(dead_node, None)
+                print("Removing peer: ", peer_name, peer_uuid)
+                self.peers.pop(peer_name, None)
                 print("Peers after removing: ", self.peers)
                 self.timeout_tracker.pop(peer_uuid, None)
 
-                with self.lock:
-                    del self.map[dead_node]
-                    for node in self.map:
-                        if dead_node in self.map[node]:
-                            del self.map[node][dead_node]
-
+                self.map[self.name].pop(peer_name, None)
                 final_seq = self.sequence_tracker.pop(peer_uuid, None)
-                self.dead_flood(final_seq + 1, dead_node) 
-            
-            elif msg.startswith("Flooddeath"): # someone in the network died, flood the information to other peers
+                self.dead_flood(final_seq + 1, peer_name) 
+            elif msg.startswith("Deathflood"): # someone in the network died, flood the information to other peers
                 print("Received Deathflood message: ", msg)
                 tokens = msg.split(",")
                 sequence_number = int(tokens[1])
-                dead_node = tokens[2]
+                peer_name = tokens[2]
 
                 if sequence_number > self.sequence_tracker.get(uuid, 0):
-                    with self.lock:
-                        self.sequence_tracker[uuid] = sequence_number
-                        self.dead_flood(sequence_number, dead_node)
-                        self.map[self.name].pop(dead_node, None)
-                        
-                        if self.map.get(dead_node, None) is not None:
-                            del self.map[dead_node]
-                        for node in self.map:
-                            if dead_node in node:
-                                del self.map[node][dead_node]
-                        
+                    self.sequence_tracker[uuid] = sequence_number
+                    self.map[self.name].pop(peer_name, None)
+                    self.dead_flood(sequence_number, peer_name) 
             
             # otherwise the msg is dropped
 
@@ -501,70 +369,6 @@ class Content_server():
     def shortest_path(self):
         # derive the shortest path according to the current link state
         rank = {}
-        
-        with self.lock:
-            # If map is empty, return empty rank
-            if not self.map:
-                return rank
-            
-            # Initialize distances with infinity for all nodes except self
-            distances = {node: float('infinity') for node in self.map}
-            distances[self.name] = 0
-            
-            # Track visited nodes
-            visited = set()
-            
-            # Track previous node in optimal path
-            previous = {node: None for node in self.map}
-            
-            # dijkstra's algorithm
-            while len(visited) < len(self.map):
-                # Find the unvisited node with minimum distance
-                current = None
-                min_dist = float('infinity')
-                
-                for node in self.map:
-                    if node not in visited and distances[node] < min_dist:
-                        current = node
-                        min_dist = distances[node]
-                
-                # If no reachable nodes are left, break
-                if current is None or distances[current] == float('infinity'):
-                    break
-                
-                # Mark as visited
-                visited.add(current)
-                
-                # Update distances to neighbors
-                for neighbor, metric in self.map[current].items():
-                    if neighbor not in visited:
-                        new_dist = distances[current] + metric
-                        if new_dist < distances[neighbor]:
-                            distances[neighbor] = new_dist
-                            previous[neighbor] = current
-            
-            # Build paths for ranking
-            for node in self.map:
-                if node == self.name:
-                    continue
-                    
-                if distances[node] == float('infinity'):
-                    # Node is unreachable
-                    rank[node] = {"distance": float('infinity'), "path": None}
-                else:
-                    # Reconstruct path
-                    path = []
-                    current = node
-                    
-                    while current != self.name:
-                        path.append(current)
-                        current = previous[current]
-                        
-                    path.append(self.name)
-                    path.reverse()
-                    
-                    rank[node] = {"distance": distances[node], "path": path}
-        
         return rank
 
     
@@ -616,11 +420,9 @@ class Content_server():
                 print(self.map)
             elif command == "rank": 
                 # Compute and print the rank
-                print(self.shortest_path())
+                print("NOT IMPLEMENTED")
             elif command == "timeout":
                 print(self.timeout_tracker)
-            elif command == "name":
-                print(self.name)
             else:
                 print("Unknown command.")
                 print("Usage: kill, uuid, neighbors, addneighbor, map, rank")
